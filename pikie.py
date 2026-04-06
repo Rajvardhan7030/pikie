@@ -116,11 +116,14 @@ class EXIFExtractor:
             self.processed_data['GPSParseError'] = "GPSInfo is not in expected format"
             return
         
-        # Extract components with safe .get() to avoid KeyError
-        lat_dms = gps_data.get(2)
-        lat_ref = gps_data.get(1)
-        lon_dms = gps_data.get(4)
-        lon_ref = gps_data.get(3)
+        # Use GPSTAGS to find correct IDs (more robust than hardcoded)
+        # Reverse map GPSTAGS to get numeric IDs from names
+        TAG_NAME_TO_ID = {v: k for k, v in GPSTAGS.items()}
+        
+        lat_dms = gps_data.get(TAG_NAME_TO_ID.get('GPSLatitude'))
+        lat_ref = gps_data.get(TAG_NAME_TO_ID.get('GPSLatitudeRef'))
+        lon_dms = gps_data.get(TAG_NAME_TO_ID.get('GPSLongitude'))
+        lon_ref = gps_data.get(TAG_NAME_TO_ID.get('GPSLongitudeRef'))
         
         # Validate all required components are present
         if not all([lat_dms, lat_ref, lon_dms, lon_ref]):
@@ -153,16 +156,25 @@ class EXIFExtractor:
         Returns:
             bool: True if valid, False otherwise
         """
-        if not isinstance(dms, tuple) or len(dms) != 3:
+        if not isinstance(dms, (tuple, list)) or len(dms) != 3:
             return False
         
-        # Each element should be a number or a tuple (numerator, denominator)
+        # Each element should be a number, a tuple (numerator, denominator),
+        # or an IFDRational object (which behaves like a number or can be cast)
         for item in dms:
-            if isinstance(item, tuple):
-                if len(item) != 2 or item[1] == 0:  # Check for division by zero
+            if isinstance(item, (tuple, list)):
+                if len(item) != 2:
                     return False
-            elif not isinstance(item, (int, float)):
-                return False
+                try:
+                    if float(item[1]) == 0:  # Check for division by zero
+                        return False
+                except (ValueError, TypeError):
+                    return False
+            else:
+                try:
+                    float(item)  # Check if it's numeric-like
+                except (ValueError, TypeError):
+                    return False
         
         return True
     

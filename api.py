@@ -3,7 +3,7 @@
 
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi import FastAPI, File, UploadFile, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
 import tempfile
 import os
 import shutil
@@ -64,6 +64,28 @@ async def add_security_headers(request: Request, call_next):
 # File size limit
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
 
+def sanitize_data(data):
+    """Recursively convert bytes to strings and handle other JSON-incompatible types."""
+    if isinstance(data, dict):
+        return {k: sanitize_data(v) for k, v in data.items()}
+    elif isinstance(data, list):
+        return [sanitize_data(v) for v in data]
+    elif isinstance(data, bytes):
+        try:
+            return data.decode('utf-8', errors='replace')
+        except:
+            return data.hex()
+    elif hasattr(data, '__dict__'):
+        return str(data)
+    else:
+        # Check if it's some PIL internal type like IFDRational
+        try:
+            import json
+            json.dumps(data)
+            return data
+        except (TypeError, OverflowError):
+            return str(data)
+
 @app.post("/extract")
 async def extract_exif(file: UploadFile = File(...)):
     """
@@ -84,7 +106,7 @@ async def extract_exif(file: UploadFile = File(...)):
             )
         
         # Validate file type
-        allowed_types = ["image/jpeg", "image/jpg", "image/tiff", "image/png"]
+        allowed_types = ["image/jpeg", "image/jpg", "image/tiff", "image/png", "image/webp"]
         if file.content_type not in allowed_types:
             raise HTTPException(
                 status_code=400,
@@ -112,8 +134,9 @@ async def extract_exif(file: UploadFile = File(...)):
         # Remove internal path from response
         data.pop('image_path', None)
         
+        # Sanitize data for JSON serialization
         logger.info(f"Success: {safe_filename}")
-        return JSONResponse(content=data)
+        return JSONResponse(content=sanitize_data(data))
         
     except HTTPException:
         raise
@@ -131,6 +154,9 @@ async def extract_exif(file: UploadFile = File(...)):
 
 @app.get("/")
 async def root():
+    # Serve index.html if it exists
+    if os.path.exists("index.html"):
+        return FileResponse("index.html")
     return {
         "message": "EXIF Extractor API",
         "endpoints": {

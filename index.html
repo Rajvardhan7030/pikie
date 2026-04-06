@@ -120,9 +120,9 @@
         
         <!-- File Input Area -->
         <div class="file-input-wrapper" id="dropZone">
-            <input type="file" id="fileInput" accept="image/jpeg,image/jpg,image/tiff,image/png">
+            <input type="file" id="fileInput" accept="image/jpeg,image/jpg,image/tiff,image/png,image/webp">
             <p>Drag & drop an image here or <label for="fileInput" class="file-label">click to browse</label></p>
-            <p style="font-size: 12px; color: #999; margin-top: 10px;">Supported: JPG, PNG, TIFF (max 10MB)</p>
+            <p style="font-size: 12px; color: #999; margin-top: 10px;">Supported: JPG, PNG, TIFF, WebP (max 10MB)</p>
         </div>
         
         <!-- Image Preview -->
@@ -195,10 +195,10 @@
         
         function handleFile(file) {
             // Validate file type (client-side check before server upload)
-            const allowedTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/tiff'];
+            const allowedTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/tiff', 'image/webp'];
             
             if (!allowedTypes.includes(file.type)) {
-                showError(`Invalid file type: ${file.type}. Please use JPG, PNG, or TIFF.`);
+                showError(`Invalid file type: ${file.type}. Please use JPG, PNG, TIFF, or WebP.`);
                 return;
             }
             
@@ -281,7 +281,7 @@
                 console.log('Sending request to API...');
                 
                 // Send POST request to your FastAPI backend
-                const response = await fetch('http://localhost:8000/extract', {
+                const response = await fetch('/extract', {
                     method: 'POST',
                     body: formData
                     // Note: Don't set Content-Type header - browser sets it automatically with boundary
