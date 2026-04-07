@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pikie - EXIF & Privacy</title>
+    <style>
+        :root {
+            --primary: #4CAF50;
+            --secondary: #2196F3;
+            --bg: #f5f7fa;
+            --card: #ffffff;
+            --text: #333;
+        }
+        body {
+            font-family: 'Segoe UI', system-ui, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            margin: 0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            min-height: 100vh;
+        }
+        .container {
+            width: 90%;
+            max-width: 900px;
+            background: var(--card);
+            margin: 40px 0;
+            padding: 30px;
+            border-radius: 12px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.08);
+        }
+        .tabs {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 30px;
+            border-bottom: 2px solid #eee;
+            padding-bottom: 10px;
+        }
+        .tab-btn {
+            padding: 10px 20px;
+            border: none;
+            background: none;
+            cursor: pointer;
+            font-weight: 600;
+            color: #666;
+            border-radius: 6px;
+            transition: all 0.3s;
+        }
+        .tab-btn.active {
+            color: var(--primary);
+            background: #e8f5e9;
+        }
+        .tab-content { display: none; }
+        .active-content { display: block; }
+
+        .drop-zone {
+            border: 2px dashed #ccc;
+            padding: 40px;
+            text-align: center;
+            border-radius: 10px;
+            margin-bottom: 20px;
+            cursor: pointer;
+        }
+        .drop-zone:hover { border-color: var(--primary); }
+        
+        .preview-img {
+            max-width: 100%;
+            max-height: 300px;
+            border-radius: 8px;
+            display: none;
+            margin: 20px auto;
+        }
+
+        .action-btn {
+            background: var(--primary);
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 16px;
+            width: 100%;
+        }
+        .action-btn:disabled { background: #ccc; }
+
+        .tag-field {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 10px;
+        }
+        .tag-field input, .tag-field select {
+            padding: 8px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+        }
+        
+        .pw-input {
+            width: 100%;
+            padding: 12px;
+            margin: 10px 0 20px 0;
+            box-sizing: border-box;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+        }
+
+        #results table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        #results td {
+            padding: 8px;
+            border-bottom: 1px solid #eee;
+        }
+        .success { color: #2e7d32; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>📷 Pikie</h1>
+        <div class="tabs">
+            <button class="tab-btn active" onclick="showTab('extractTab')">Extract EXIF</button>
+            <button class="tab-btn" onclick="showTab('tagTab')">Tag Editor</button>
+            <button class="tab-btn" onclick="showTab('privacyTab')">Privacy Tools</button>
+        </div>
+
+        <!-- Extract Tab -->
+        <div id="extractTab" class="tab-content active-content">
+            <div class="drop-zone" onclick="document.getElementById('fileExt').click()">
+                <input type="file" id="fileExt" style="display:none" onchange="handleFileSelect(event, 'previewExt', 'btnExt')">
+                <p>Click or drag to upload image for extraction</p>
+            </div>
+            <img id="previewExt" class="preview-img">
+            <button id="btnExt" class="action-btn" onclick="extractExif()" disabled>Extract Metadata</button>
+            <div id="extractResults" style="margin-top:20px"></div>
+        </div>
+
+        <!-- Tag Tab -->
+        <div id="tagTab" class="tab-content">
+            <div class="drop-zone" onclick="document.getElementById('fileTag').click()">
+                <input type="file" id="fileTag" style="display:none" onchange="handleFileSelect(event, 'previewTag', 'btnTag')">
+                <p>Click or drag to upload image for tagging</p>
+            </div>
+            <img id="previewTag" class="preview-img">
+            <div id="tagFields" style="margin: 20px 0"></div>
+            <button onclick="addTagField()" style="margin-bottom: 20px">+ Add Tag</button>
+            <button id="btnTag" class="action-btn" onclick="saveTags()" disabled>Save & Download</button>
+        </div>
+
+        <!-- Privacy Tab -->
+        <div id="privacyTab" class="tab-content">
+            <div style="display: flex; gap: 20px; margin-bottom: 30px;">
+                <button class="action-btn" style="background:var(--secondary)" onclick="togglePrivacyMode('enc')">Encrypt</button>
+                <button class="action-btn" style="background:var(--secondary)" onclick="togglePrivacyMode('dec')">Decrypt</button>
+            </div>
+
+            <div id="encMode">
+                <h3>Encrypt Image</h3>
+                <div class="drop-zone" onclick="document.getElementById('fileEnc').click()">
+                    <input type="file" id="fileEnc" style="display:none" onchange="handleFileSelect(event, 'previewEnc', 'btnEnc')">
+                    <p>Select image to encrypt</p>
+                </div>
+                <img id="previewEnc" class="preview-img">
+                <input type="password" id="encPassword" class="pw-input" placeholder="Encryption Password (min 8 chars)">
+                <button id="btnEnc" class="action-btn" onclick="encryptFile()" disabled>Encrypt & Download .pikie</button>
+            </div>
+
+            <div id="decMode" style="display:none">
+                <h3>Decrypt .pikie File</h3>
+                <div class="drop-zone" onclick="document.getElementById('fileDec').click()">
+                    <input type="file" id="fileDec" style="display:none" onchange="handleFileSelect(event, '', 'btnDec')">
+                    <p>Select .pikie file to decrypt</p>
+                </div>
+                <input type="password" id="decPassword" class="pw-input" placeholder="Decryption Password">
+                <button id="btnDec" class="action-btn" onclick="decryptFile()" disabled>Decrypt & Download Image</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/app.js"></script>
+    <script>
+        function togglePrivacyMode(mode) {
+            document.getElementById('encMode').style.display = mode === 'enc' ? 'block' : 'none';
+            document.getElementById('decMode').style.display = mode === 'dec' ? 'block' : 'none';
+        }
+        // Override showTab to handle internal display states
+        const originalShowTab = showTab;
+        window.showTab = function(tabId) {
+            document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active-content'));
+            document.getElementById(tabId).classList.add('active-content');
+            document.querySelectorAll('.tab-btn').forEach(el => el.classList.remove('active'));
+            document.querySelector(`[onclick="showTab('${tabId}')"]`).classList.add('active');
+            selectedFile = null; // Reset selection on tab switch
+        }
+    </script>
+</body>
+</html>

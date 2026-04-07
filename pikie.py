@@ -1,240 +1,21 @@
 import argparse
-import os  # Import os for file path operations
-import sys  # Import sys for exit codes
-from PIL import Image, UnidentifiedImageError  # Import specific exceptions
-from PIL.ExifTags import TAGS, GPSTAGS
+import sys
+import os
+import json
+import getpass
+from core.exif_extractor import EXIFExtractor
+from core.tag_manager import TagManager
+from core.crypto_engine import CryptoEngine
+from utils.validators import validate_password
 
-
-class EXIFExtractor:
-    """
-    A class to extract and process EXIF metadata from image files.
-    Includes comprehensive error handling for edge cases.
-    """
-    
-    def __init__(self, image_path):
-        """
-        Constructor: initializes the extractor with an image file.
-        
-        Args:
-            image_path: Path to the image file to analyze
-        """
-        self.image_path = image_path
-        self.img = None
-        self.exif_data = None
-        self.processed_data = {}
-        
-        # Validate file exists before trying to open
-        # This provides a clearer error than PIL's generic "cannot identify"
-        if not os.path.exists(image_path):
-            self.processed_data['error'] = f"File not found: {image_path}"
-            return
-            
-        # Check if it's actually a file (not a directory)
-        if not os.path.isfile(image_path):
-            self.processed_data['error'] = f"Path is not a file: {image_path}"
-            return
-        
-        # Attempt to load the image
-        self._load_image()
-    
-    def _load_image(self):
-        """
-        Private method to load the image file with specific error handling.
-        Catches different types of failures for better user feedback.
-        """
-        try:
-            # Open the image using Pillow
-            self.img = Image.open(self.image_path)
-            
-        except PermissionError:
-            # Specific handling for permission denied
-            self.processed_data['error'] = f"Permission denied: {self.image_path}"
-            
-        except UnidentifiedImageError:
-            # PIL cannot identify this as a valid image format
-            self.processed_data['error'] = f"Unsupported or corrupted image format: {self.image_path}"
-            
-        except Exception as e:
-            # Catch-all for any other loading errors
-            self.processed_data['error'] = f"Failed to load image: {str(e)}"
-            
-        else:
-            # Only try to get EXIF if image loaded successfully
-            # This prevents AttributeError on self.img being None
-            try:
-                self.exif_data = self.img._getexif()
-            except Exception as e:
-                # Some images load but have corrupted EXIF data
-                self.processed_data['error'] = f"Image loaded but EXIF data is corrupted: {str(e)}"
-    
-    def extract_all(self):
-        """
-        Main public method to extract and process all EXIF data.
-        
-        Returns:
-            dict: Processed EXIF data or error message
-        """
-        # If we already have an error from __init__ or _load_image, return it
-        if 'error' in self.processed_data:
-            return self.processed_data
-            
-        # Check if we have EXIF data to work with
-        # Note: exif_data can be None even if image loaded (no EXIF in file)
-        if self.exif_data is None:
-            self.processed_data['error'] = "No EXIF data found in this image"
-            return self.processed_data
-        
-        # Process standard EXIF tags
-        self._process_standard_tags()
-        
-        # Process GPS data separately
-        self._process_gps_data()
-        
-        return self.processed_data
-    
-    def _process_standard_tags(self):
-        """
-        Convert numeric EXIF tags to human-readable names.
-        """
-        for tag_id, value in self.exif_data.items():
-            tag_name = TAGS.get(tag_id, str(tag_id))
-            self.processed_data[tag_name] = value
-    
-    def _process_gps_data(self):
-        """
-        Extract and convert GPS coordinates with validation.
-        Handles incomplete or malformed GPS data gracefully.
-        """
-        if 'GPSInfo' not in self.processed_data:
-            return
-        
-        gps_data = self.processed_data['GPSInfo']
-        
-        # Validate gps_data is actually a dictionary
-        # Some cameras write GPSInfo as bytes or other types
-        if not isinstance(gps_data, dict):
-            self.processed_data['GPSParseError'] = "GPSInfo is not in expected format"
-            return
-        
-        # Use GPSTAGS to find correct IDs (more robust than hardcoded)
-        # Reverse map GPSTAGS to get numeric IDs from names
-        TAG_NAME_TO_ID = {v: k for k, v in GPSTAGS.items()}
-        
-        lat_dms = gps_data.get(TAG_NAME_TO_ID.get('GPSLatitude'))
-        lat_ref = gps_data.get(TAG_NAME_TO_ID.get('GPSLatitudeRef'))
-        lon_dms = gps_data.get(TAG_NAME_TO_ID.get('GPSLongitude'))
-        lon_ref = gps_data.get(TAG_NAME_TO_ID.get('GPSLongitudeRef'))
-        
-        # Validate all required components are present
-        if not all([lat_dms, lat_ref, lon_dms, lon_ref]):
-            self.processed_data['GPSParseError'] = "Incomplete GPS data (missing lat/lon components)"
-            return
-        
-        # Validate DMS tuples have correct structure
-        if not self._validate_dms(lat_dms) or not self._validate_dms(lon_dms):
-            self.processed_data['GPSParseError'] = "Invalid DMS coordinate format"
-            return
-        
-        try:
-            latitude = self._convert_dms_to_decimal(lat_dms, lat_ref)
-            longitude = self._convert_dms_to_decimal(lon_dms, lon_ref)
-            
-            self.processed_data['GPSLatitudeDecimal'] = latitude
-            self.processed_data['GPSLongitudeDecimal'] = longitude
-            
-        except Exception as e:
-            # Catch any conversion errors (division by zero, etc.)
-            self.processed_data['GPSParseError'] = f"Failed to convert GPS coordinates: {str(e)}"
-    
-    def _validate_dms(self, dms):
-        """
-        Validate that DMS tuple has correct structure.
-        
-        Args:
-            dms: Tuple to validate
-            
-        Returns:
-            bool: True if valid, False otherwise
-        """
-        if not isinstance(dms, (tuple, list)) or len(dms) != 3:
-            return False
-        
-        # Each element should be a number, a tuple (numerator, denominator),
-        # or an IFDRational object (which behaves like a number or can be cast)
-        for item in dms:
-            if isinstance(item, (tuple, list)):
-                if len(item) != 2:
-                    return False
-                try:
-                    if float(item[1]) == 0:  # Check for division by zero
-                        return False
-                except (ValueError, TypeError):
-                    return False
-            else:
-                try:
-                    float(item)  # Check if it's numeric-like
-                except (ValueError, TypeError):
-                    return False
-        
-        return True
-    
-    def _convert_dms_to_decimal(self, dms_tuple, direction):
-        """
-        Convert DMS to decimal with error handling.
-        """
-        if isinstance(dms_tuple[0], tuple):
-            degrees = dms_tuple[0][0] / dms_tuple[0][1]
-            minutes = dms_tuple[1][0] / dms_tuple[1][1]
-            seconds = dms_tuple[2][0] / dms_tuple[2][1]
-        else:
-            degrees, minutes, seconds = dms_tuple
-        
-        decimal = degrees + (minutes / 60.0) + (seconds / 3600.0)
-        
-        if direction in ['S', 'W']:
-            decimal = -decimal
-            
-        return decimal
-
-
-def main():
-    """
-    Main entry point with comprehensive error handling.
-    """
-    parser = argparse.ArgumentParser(
-        description="Extract EXIF metadata from image files"
-    )
-    
-    parser.add_argument(
-        "image_path",
-        help="Path to the image file to analyze"
-    )
-    
-    parser.add_argument(
-        "--format",
-        choices=["text", "json"],
-        default="text",
-        help="Output format: text or json (default: text)"
-    )
-    
-    parser.add_argument(
-        "--all",
-        action="store_true",
-        help="Show all EXIF tags"
-    )
-    
-    args = parser.parse_args()
-    
-    # Create extractor
+def handle_extract(args):
     extractor = EXIFExtractor(args.image_path)
     data = extractor.extract_all()
     
-    # Handle errors
     if 'error' in data:
-        print(f"Error: {data['error']}", file=sys.stderr)  # Print errors to stderr
-        return 1  # Non-zero exit code indicates failure
+        print(f"Error: {data['error']}", file=sys.stderr)
+        return 1
     
-    # Output results (same as before)
     if args.all:
         print("ALL EXIF TAGS:")
         print("-" * 60)
@@ -247,7 +28,6 @@ def main():
         print(f"Total tags: {len(data)}")
         
     elif args.format == "json":
-        import json
         print(json.dumps(data, indent=2, default=str))
         
     else:
@@ -267,9 +47,178 @@ def main():
         
         print("-" * 50)
         print(f"Total tags extracted: {len(data)}")
-    
     return 0
 
+def handle_tag(args):
+    try:
+        tm = TagManager(args.image_path)
+        
+        if args.clear_all:
+            tm.clear_all()
+            print("All custom tags cleared.")
+        
+        if args.remove:
+            for key in args.remove:
+                if tm.remove_tag(key):
+                    print(f"Removed tag: {key}")
+                else:
+                    print(f"Tag not found: {key}")
+        
+        if args.file:
+            with open(args.file, 'r') as f:
+                tags = json.load(f)
+                for k, v in tags.items():
+                    tm.add_tag(k, v)
+                    print(f"Added tag from file: {k}={v}")
+
+        if args.add:
+            for item in args.add:
+                if "=" not in item:
+                    print(f"Invalid tag format: {item}. Use key=value or key:number=value")
+                    continue
+                
+                key_part, value = item.split("=", 1)
+                is_numeric = False
+                if ":number" in key_part:
+                    key = key_part.replace(":number", "")
+                    is_numeric = True
+                else:
+                    key = key_part
+                
+                try:
+                    tm.add_tag(key, value, is_numeric=is_numeric)
+                    print(f"Added tag: {key}={value}")
+                except ValueError as e:
+                    print(f"Error adding tag '{key}': {str(e)}")
+
+        if args.list:
+            tags = tm.list_tags()
+            if not tags:
+                print("No custom tags found.")
+            else:
+                print("Custom Tags:")
+                for k, v in tags.items():
+                    print(f"  {k}: {v}")
+        
+        if args.add or args.remove or args.clear_all or args.file:
+            tm.save()
+            print("Changes saved successfully.")
+        return 0
+    except Exception as e:
+        print(f"Error: {str(e)}", file=sys.stderr)
+        return 1
+
+def handle_encrypt(args):
+    password = args.password
+    if not password:
+        if args.password_file:
+            with open(args.password_file, 'r') as f:
+                password = f.read().strip()
+        else:
+            password = getpass.getpass("Enter password for encryption: ")
+            confirm = getpass.getpass("Confirm password: ")
+            if password != confirm:
+                print("Passwords do not match!")
+                return 1
+
+    valid, msg = validate_password(password)
+    if not valid:
+        print(f"Warning: {msg}")
+
+    try:
+        engine = CryptoEngine(password)
+        output = args.output or (os.path.splitext(args.image_path)[0] + ".pikie")
+        engine.encrypt(args.image_path, output, mode=args.mode)
+        print(f"Encryption successful. Saved to: {output}")
+        return 0
+    except Exception as e:
+        print(f"Encryption failed: {str(e)}", file=sys.stderr)
+        return 1
+
+def handle_decrypt(args):
+    password = args.password
+    if not password:
+        password = getpass.getpass("Enter password for decryption: ")
+
+    try:
+        engine = CryptoEngine(password)
+        
+        if args.metadata:
+            meta = engine.get_metadata(args.image_path)
+            print("Encrypted File Metadata:")
+            print(json.dumps(meta, indent=2))
+            return 0
+
+        if args.verify_only:
+            engine.decrypt(args.image_path) # Just check password
+            print("Password verified successfully.")
+            return 0
+
+        output = args.output
+        orig_ext, _ = engine.decrypt(args.image_path, output)
+        if not output:
+            output = os.path.splitext(args.image_path)[0] + "_restored" + orig_ext
+            engine.decrypt(args.image_path, output)
+            
+        print(f"Decryption successful. Saved to: {output}")
+        return 0
+    except Exception as e:
+        print(f"Decryption failed: {str(e)}", file=sys.stderr)
+        return 1
+
+def main():
+    parser = argparse.ArgumentParser(description="Pikie - EXIF Metadata & Privacy Tool")
+    subparsers = parser.add_subparsers(dest="command", help="Available commands")
+
+    # Extract command (also default)
+    extract_parser = subparsers.add_parser("extract", help="Extract EXIF metadata")
+    extract_parser.add_argument("image_path", help="Path to the image file")
+    extract_parser.add_argument("--format", choices=["text", "json"], default="text", help="Output format")
+    extract_parser.add_argument("--all", action="store_true", help="Show all tags")
+
+    # Tag command
+    tag_parser = subparsers.add_parser("tag", help="Custom metadata tagging")
+    tag_parser.add_argument("image_path", help="Path to the image file")
+    tag_parser.add_argument("--add", action="append", help="Add tag 'key=value' or 'key:number=value'")
+    tag_parser.add_argument("--file", help="Load tags from JSON file")
+    tag_parser.add_argument("--remove", action="append", help="Remove specific tag")
+    tag_parser.add_argument("--clear-all", action="store_true", help="Remove all custom tags")
+    tag_parser.add_argument("--list", action="store_true", help="List existing custom tags")
+
+    # Encrypt command
+    enc_parser = subparsers.add_parser("encrypt", help="Encrypt image")
+    enc_parser.add_argument("image_path", help="Path to the image file")
+    enc_parser.add_argument("--output", help="Output .pikie file path")
+    enc_parser.add_argument("--password", help="Password (insecure, use prompt)")
+    enc_parser.add_argument("--password-file", help="Read password from file")
+    enc_parser.add_argument("--mode", choices=["full", "exif-preserve"], default="full", help="Encryption mode")
+
+    # Decrypt command
+    dec_parser = subparsers.add_parser("decrypt", help="Decrypt image")
+    dec_parser.add_argument("image_path", help="Path to the .pikie file")
+    dec_parser.add_argument("--output", help="Output image file path")
+    dec_parser.add_argument("--password", help="Password")
+    dec_parser.add_argument("--verify-only", action="store_true", help="Verify password only")
+    dec_parser.add_argument("--metadata", action="store_true", help="Show metadata only")
+
+    # Handle legacy behavior: if first arg is a file and not a command
+    if len(sys.argv) > 1 and sys.argv[1] not in subparsers.choices and not sys.argv[1].startswith('-'):
+        # Assume 'extract' command
+        sys.argv.insert(1, 'extract')
+
+    args = parser.parse_args()
+
+    if args.command == "extract":
+        return handle_extract(args)
+    elif args.command == "tag":
+        return handle_tag(args)
+    elif args.command == "encrypt":
+        return handle_encrypt(args)
+    elif args.command == "decrypt":
+        return handle_decrypt(args)
+    else:
+        parser.print_help()
+        return 0
 
 if __name__ == "__main__":
-    exit(main())
+    sys.exit(main())

@@ -1,71 +1,35 @@
-# api.py - FastAPI web API for EXIF extraction
-# Run with: uvicorn api:app --reload --host 0.0.0.0 --port 8000
-
+from fastapi import FastAPI, File, UploadFile, HTTPException, Form, Request
+from fastapi.responses import JSONResponse, FileResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi import FastAPI, File, UploadFile, HTTPException, Request
-from fastapi.responses import JSONResponse, FileResponse
 import tempfile
 import os
 import shutil
-import logging
-import traceback  # For detailed error logging
+import json
+import io
+from typing import List, Optional
 
-# Set up logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+from core.exif_extractor import EXIFExtractor
+from core.tag_manager import TagManager
+from core.crypto_engine import CryptoEngine
+from utils.validators import validate_tag_name, validate_password
 
-# Import your EXIFExtractor - wrap in try/except to catch import errors
-try:
-    from pikie import EXIFExtractor
-    logger.info("Successfully imported EXIFExtractor")
-except Exception as e:
-    logger.error(f"Failed to import EXIFExtractor: {str(e)}")
-    logger.error(traceback.format_exc())
-    # Create a placeholder that will fail gracefully
-    class EXIFExtractor:
-        def __init__(self, path):
-            self.processed_data = {'error': f'Import error: {str(e)}'}
-        def extract_all(self):
-            return self.processed_data
+from fastapi.staticfiles import StaticFiles
 
-# Create FastAPI application
-app = FastAPI(
-    title="EXIF Extractor API",
-    description="Upload images and extract EXIF metadata",
-    version="1.0.0"
-)
+app = FastAPI(title="Pikie API", version="2.0.0")
 
-# CORS - Must be added BEFORE any routes
-# Allow all origins for development (restrict in production!)
+app.mount("/static", StaticFiles(directory="web/static"), name="static")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allows ALL origins during development
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Security headers middleware
-@app.middleware("http")
-async def add_security_headers(request: Request, call_next):
-    try:
-        response = await call_next(request)
-        response.headers["X-Content-Type-Options"] = "nosniff"
-        response.headers["X-Frame-Options"] = "DENY"
-        response.headers["X-XSS-Protection"] = "1; mode=block"
-        # Add CORS headers explicitly as backup
-        response.headers["Access-Control-Allow-Origin"] = "*"
-        return response
-    except Exception as e:
-        # If an error occurs, we still need to return a response with CORS headers
-        logger.error(f"Error in middleware: {str(e)}")
-        raise
-
-# File size limit
-MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
+MAX_FILE_SIZE = 20 * 1024 * 1024  # 20MB
 
 def sanitize_data(data):
-    """Recursively convert bytes to strings and handle other JSON-incompatible types."""
     if isinstance(data, dict):
         return {k: sanitize_data(v) for k, v in data.items()}
     elif isinstance(data, list):
@@ -75,96 +39,127 @@ def sanitize_data(data):
             return data.decode('utf-8', errors='replace')
         except:
             return data.hex()
-    elif hasattr(data, '__dict__'):
-        return str(data)
     else:
-        # Check if it's some PIL internal type like IFDRational
-        try:
-            import json
-            json.dumps(data)
-            return data
-        except (TypeError, OverflowError):
-            return str(data)
+        return data
 
 @app.post("/extract")
 async def extract_exif(file: UploadFile = File(...)):
-    """
-    Endpoint to upload an image and extract EXIF data.
-    """
-    temp_file_path = None
+    with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(file.filename)[1]) as tmp:
+        shutil.copyfileobj(file.file, tmp)
+        temp_path = tmp.name
     
     try:
-        # Check file size
-        file.file.seek(0, os.SEEK_END)
-        file_size = file.file.tell()
-        file.file.seek(0)
-        
-        if file_size > MAX_FILE_SIZE:
-            raise HTTPException(
-                status_code=413,
-                detail=f"File too large: {file_size} bytes. Max: {MAX_FILE_SIZE} bytes (10MB)"
-            )
-        
-        # Validate file type
-        allowed_types = ["image/jpeg", "image/jpg", "image/tiff", "image/png", "image/webp"]
-        if file.content_type not in allowed_types:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Unsupported file type: {file.content_type}"
-            )
-        
-        # Create temp file
-        safe_filename = os.path.basename(file.filename)
-        suffix = os.path.splitext(safe_filename)[1]
-        
-        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-            shutil.copyfileobj(file.file, tmp)
-            temp_file_path = tmp.name
-        
-        logger.info(f"Processing: {safe_filename} ({file_size} bytes)")
-        
-        # Extract EXIF
-        extractor = EXIFExtractor(temp_file_path)
+        extractor = EXIFExtractor(temp_path)
         data = extractor.extract_all()
-        
         if 'error' in data:
-            logger.warning(f"Extraction error: {data['error']}")
             raise HTTPException(status_code=422, detail=data['error'])
-        
-        # Remove internal path from response
-        data.pop('image_path', None)
-        
-        # Sanitize data for JSON serialization
-        logger.info(f"Success: {safe_filename}")
         return JSONResponse(content=sanitize_data(data))
-        
-    except HTTPException:
-        raise
-        
-    except Exception as e:
-        logger.error(f"Unexpected error: {str(e)}")
-        logger.error(traceback.format_exc())
-        raise HTTPException(status_code=500, detail=f"Internal error: {str(e)}")
-        
     finally:
-        # Always cleanup temp file
-        if temp_file_path and os.path.exists(temp_file_path):
-            os.unlink(temp_file_path)
-            logger.debug(f"Cleaned up: {temp_file_path}")
+        if os.path.exists(temp_path):
+            os.unlink(temp_path)
+
+@app.post("/tags")
+async def get_custom_tags(file: UploadFile = File(...)):
+    with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(file.filename)[1]) as tmp:
+        shutil.copyfileobj(file.file, tmp)
+        temp_path = tmp.name
+    try:
+        tm = TagManager(temp_path)
+        return tm.list_tags()
+    finally:
+        if os.path.exists(temp_path):
+            os.unlink(temp_path)
+
+@app.post("/tag")
+async def add_tags(
+    file: UploadFile = File(...),
+    tags_json: str = Form(...) # JSON string of tags
+):
+    with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(file.filename)[1]) as tmp:
+        shutil.copyfileobj(file.file, tmp)
+        temp_path = tmp.name
+    
+    try:
+        tm = TagManager(temp_path)
+        tags = json.loads(tags_json)
+        for k, v in tags.items():
+            is_numeric = isinstance(v, (int, float))
+            tm.add_tag(k, v, is_numeric=is_numeric)
+        
+        output_path = temp_path + "_tagged"
+        tm.save(output_path)
+        
+        with open(output_path, "rb") as f:
+            content = f.read()
+        
+        if os.path.exists(output_path): os.unlink(output_path)
+        
+        return StreamingResponse(
+            io.BytesIO(content),
+            media_type="image/jpeg",
+            headers={"Content-Disposition": f"attachment; filename=tagged_{file.filename}"}
+        )
+    finally:
+        if os.path.exists(temp_path): os.unlink(temp_path)
+
+@app.post("/encrypt")
+async def encrypt_image(
+    file: UploadFile = File(...),
+    password: str = Form(...)
+):
+    valid, msg = validate_password(password)
+    if not valid:
+        raise HTTPException(status_code=400, detail=msg)
+        
+    with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(file.filename)[1]) as tmp:
+        shutil.copyfileobj(file.file, tmp)
+        temp_path = tmp.name
+    
+    enc_path = temp_path + ".pikie"
+    try:
+        engine = CryptoEngine(password)
+        engine.encrypt(temp_path, enc_path)
+        
+        with open(enc_path, "rb") as f:
+            content = f.read()
+        
+        if os.path.exists(enc_path): os.unlink(enc_path)
+
+        return StreamingResponse(
+            io.BytesIO(content),
+            media_type="application/octet-stream",
+            headers={"Content-Disposition": f"attachment; filename={os.path.splitext(file.filename)[0]}.pikie"}
+        )
+    finally:
+        if os.path.exists(temp_path): os.unlink(temp_path)
+
+@app.post("/decrypt")
+async def decrypt_image(
+    file: UploadFile = File(...),
+    password: str = Form(...)
+):
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".pikie") as tmp:
+        shutil.copyfileobj(file.file, tmp)
+        temp_path = tmp.name
+    
+    try:
+        engine = CryptoEngine(password)
+        orig_ext, decrypted_data = engine.decrypt(temp_path)
+        
+        return StreamingResponse(
+            io.BytesIO(decrypted_data),
+            media_type="image/jpeg", # Or detect from orig_ext
+            headers={"Content-Disposition": f"attachment; filename=restored{orig_ext}"}
+        )
+    except Exception as e:
+        raise HTTPException(status_code=403, detail=str(e))
+    finally:
+        if os.path.exists(temp_path): os.unlink(temp_path)
 
 @app.get("/")
 async def root():
-    # Serve index.html if it exists
-    if os.path.exists("index.html"):
-        return FileResponse("index.html")
-    return {
-        "message": "EXIF Extractor API",
-        "endpoints": {
-            "POST /extract": "Upload an image to extract EXIF data",
-            "GET /docs": "Interactive API documentation"
-        }
-    }
+    return FileResponse("web/templates/index.html")
 
 @app.get("/health")
-async def health_check():
-    return {"status": "healthy", "extractor_loaded": 'EXIFExtractor' in globals()}
+async def health():
+    return {"status": "ok"}
