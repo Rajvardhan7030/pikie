@@ -151,17 +151,29 @@ class EXIFExtractor:
     def _convert_dms_to_decimal(self, dms_tuple, direction):
         """
         Convert DMS to decimal with error handling.
+        Supports both tuple of rationals and simple numeric tuples.
         """
-        if isinstance(dms_tuple[0], tuple):
-            degrees = dms_tuple[0][0] / dms_tuple[0][1]
-            minutes = dms_tuple[1][0] / dms_tuple[1][1]
-            seconds = dms_tuple[2][0] / dms_tuple[2][1]
-        else:
-            degrees, minutes, seconds = dms_tuple
-        
-        decimal = degrees + (minutes / 60.0) + (seconds / 3600.0)
-        
-        if direction in ['S', 'W']:
-            decimal = -decimal
+        try:
+            parts = []
+            for item in dms_tuple:
+                if isinstance(item, (tuple, list)):
+                    if len(item) == 2 and item[1] != 0:
+                        parts.append(float(item[0]) / float(item[1]))
+                    else:
+                        parts.append(float(item[0])) # Fallback
+                else:
+                    parts.append(float(item))
             
-        return decimal
+            if len(parts) < 3:
+                # Pad with zeros if needed
+                parts.extend([0.0] * (3 - len(parts)))
+                
+            degrees, minutes, seconds = parts[:3]
+            decimal = degrees + (minutes / 60.0) + (seconds / 3600.0)
+            
+            if direction in ['S', 'W']:
+                decimal = -decimal
+                
+            return decimal
+        except (ZeroDivisionError, ValueError, TypeError, IndexError) as e:
+            raise ValueError(f"Invalid DMS value {dms_tuple}: {str(e)}")

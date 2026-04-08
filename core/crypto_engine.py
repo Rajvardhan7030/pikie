@@ -1,5 +1,6 @@
 import os
 import struct
+import io
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -17,6 +18,11 @@ class CryptoEngine:
     NONCE_SIZE = 12
     TAG_SIZE = 16
     PBKDF2_ITERATIONS = 100000
+    
+    # Header format: magic(8s), version(B), salt(32s), nonce(12s), ext(4s)
+    # Using '<' for little-endian to be consistent across platforms
+    HEADER_FMT = "<8sB32s12s4s"
+    HEADER_SIZE = struct.calcsize(HEADER_FMT)
 
     def __init__(self, password):
         self.password = password.encode() if isinstance(password, str) else password
@@ -33,7 +39,7 @@ class CryptoEngine:
     def encrypt(self, input_path, output_path, mode="full"):
         """
         Encrypts an image file.
-        Mode: 'full' (entire file) or 'exif-preserve' (future improvement).
+        Mode: 'full' (entire file).
         """
         with open(input_path, 'rb') as f:
             data = f.read()
@@ -55,7 +61,7 @@ class CryptoEngine:
         
         # Build header
         header = struct.pack(
-            f"8sB{self.SALT_SIZE}s{self.NONCE_SIZE}s4s",
+            self.HEADER_FMT,
             self.MAGIC_BYTES,
             self.VERSION,
             salt,
@@ -70,16 +76,15 @@ class CryptoEngine:
     def decrypt(self, input_path, output_path=None):
         """
         Decrypts a .pikie file.
-        Returns the original extension and data if output_path is None.
+        Returns the original extension and data.
         """
         with open(input_path, 'rb') as f:
-            header_size = 8 + 1 + self.SALT_SIZE + self.NONCE_SIZE + 4
-            header_data = f.read(header_size)
-            if len(header_data) < header_size:
+            header_data = f.read(self.HEADER_SIZE)
+            if len(header_data) < self.HEADER_SIZE:
                 raise ValueError("Invalid .pikie file: Header too short")
             
             magic, version, salt, nonce, ext_bytes = struct.unpack(
-                f"8sB{self.SALT_SIZE}s{self.NONCE_SIZE}s4s",
+                self.HEADER_FMT,
                 header_data
             )
             
@@ -113,17 +118,16 @@ class CryptoEngine:
     def get_metadata(input_path):
         """Returns metadata from .pikie file without decrypting."""
         with open(input_path, 'rb') as f:
-            header_size = 8 + 1 + 32 + 12 + 4
-            header_data = f.read(header_size)
-            if len(header_data) < header_size:
+            header_data = f.read(CryptoEngine.HEADER_SIZE)
+            if len(header_data) < CryptoEngine.HEADER_SIZE:
                 raise ValueError("Invalid .pikie file: Header too short")
             
             magic, version, salt, nonce, ext_bytes = struct.unpack(
-                f"8sB32s12s4s",
+                CryptoEngine.HEADER_FMT,
                 header_data
             )
             
-            if magic != b"PIKIEENC":
+            if magic != CryptoEngine.MAGIC_BYTES:
                 raise ValueError("Not a .pikie file")
             
             return {

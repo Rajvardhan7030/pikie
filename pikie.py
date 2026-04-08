@@ -150,15 +150,20 @@ def handle_decrypt(args):
             return 0
 
         if args.verify_only:
-            engine.decrypt(args.image_path) # Just check password
+            # We only need to check if it decrypts successfully
+            # This still reads the file but it's the only way with GCM
+            engine.decrypt(args.image_path)
             print("Password verified successfully.")
             return 0
 
         output = args.output
-        orig_ext, _ = engine.decrypt(args.image_path, output)
         if not output:
+            # Get extension from metadata to avoid decrypting twice
+            meta = engine.get_metadata(args.image_path)
+            orig_ext = meta["original_extension"]
             output = os.path.splitext(args.image_path)[0] + "_restored" + orig_ext
-            engine.decrypt(args.image_path, output)
+        
+        engine.decrypt(args.image_path, output)
             
         print(f"Decryption successful. Saved to: {output}")
         return 0

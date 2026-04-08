@@ -6,6 +6,7 @@ import os
 import shutil
 import json
 import io
+import mimetypes
 from typing import List, Optional
 
 from core.exif_extractor import EXIFExtractor
@@ -31,14 +32,19 @@ MAX_FILE_SIZE = 20 * 1024 * 1024  # 20MB
 
 def sanitize_data(data):
     if isinstance(data, dict):
-        return {k: sanitize_data(v) for k, v in data.items()}
-    elif isinstance(data, list):
+        return {str(k): sanitize_data(v) for k, v in data.items()}
+    elif isinstance(data, (list, tuple)):
         return [sanitize_data(v) for v in data]
     elif isinstance(data, bytes):
         try:
             return data.decode('utf-8', errors='replace')
         except:
             return data.hex()
+    elif hasattr(data, '__str__') and 'IFDRational' in str(type(data)):
+        try:
+            return float(data)
+        except:
+            return str(data)
     else:
         return data
 
@@ -133,6 +139,14 @@ async def encrypt_image(
     finally:
         if os.path.exists(temp_path): os.unlink(temp_path)
 
+def get_media_type(extension):
+    if not extension:
+        return "application/octet-stream"
+    if not extension.startswith('.'):
+        extension = '.' + extension
+    mt, _ = mimetypes.guess_type(f"file{extension}")
+    return mt or "application/octet-stream"
+
 @app.post("/decrypt")
 async def decrypt_image(
     file: UploadFile = File(...),
@@ -141,20 +155,24 @@ async def decrypt_image(
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pikie") as tmp:
         shutil.copyfileobj(file.file, tmp)
         temp_path = tmp.name
-    
+
     try:
         engine = CryptoEngine(password)
         orig_ext, decrypted_data = engine.decrypt(temp_path)
-        
+
+        media_type = get_media_type(orig_ext)
+
         return StreamingResponse(
             io.BytesIO(decrypted_data),
-            media_type="image/jpeg", # Or detect from orig_ext
+            media_type=media_type,
             headers={"Content-Disposition": f"attachment; filename=restored{orig_ext}"}
         )
     except Exception as e:
         raise HTTPException(status_code=403, detail=str(e))
     finally:
-        if os.path.exists(temp_path): os.unlink(temp_path)
+        if os.path.exists(temp_path):
+            os.unlink(temp_path)
+
 
 @app.get("/")
 async def root():

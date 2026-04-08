@@ -3,6 +3,7 @@ import json
 import shutil
 import piexif
 from PIL import Image
+from utils.validators import validate_tag_name
 
 class TagManager:
     """
@@ -11,6 +12,7 @@ class TagManager:
     """
     
     USER_COMMENT_TAG = 0x9286
+    ENCODING_PREFIX_LEN = 8
     
     def __init__(self, image_path):
         self.image_path = image_path
@@ -21,30 +23,45 @@ class TagManager:
     def _load_exif(self):
         """Loads EXIF data and extracts existing custom tags from UserComment."""
         try:
-            self.exif_dict = piexif.load(self.image_path)
+            # Check if it's a JPEG or TIFF for piexif
+            with open(self.image_path, 'rb') as f:
+                header = f.read(2)
+                if header not in (b'\xff\xd8', b'II', b'MM'):
+                    # Not JPEG or TIFF, piexif might fail or behave unexpectedly
+                    # We'll still try to load with PIL for other formats
+                    img = Image.open(self.image_path)
+                    if 'exif' in img.info:
+                        self.exif_dict = piexif.load(img.info['exif'])
+                    else:
+                        raise ValueError("No EXIF in non-JPEG file")
+                else:
+                    self.exif_dict = piexif.load(self.image_path)
+            
             user_comment = self.exif_dict.get("Exif", {}).get(self.USER_COMMENT_TAG, b"")
             
-            # UserComment in piexif can be prefixed with encoding (e.g., ASCII, UNICODE)
-            # Standard: first 8 bytes are encoding. We'll try to handle it.
-            if len(user_comment) > 8:
-                # Common prefixes: b'ASCII\x00\x00\x00', b'UNICODE\x00'
-                # We'll just try to find the JSON part.
+            if len(user_comment) > self.ENCODING_PREFIX_LEN:
+                prefix = user_comment[:self.ENCODING_PREFIX_LEN]
+                data = user_comment[self.ENCODING_PREFIX_LEN:]
+                
                 comment_str = ""
                 try:
-                    # Try to decode the whole thing and find JSON
-                    decoded = user_comment.decode('utf-16' if b'UNICODE' in user_comment[:8] else 'ascii', errors='ignore')
-                    # Find first '{'
-                    start = decoded.find('{')
+                    if b'UNICODE' in prefix:
+                        # Try to handle UTF-16 with possible BOM or LE/BE
+                        # We'll try LE first since that's how we save it
+                        try:
+                            comment_str = data.decode('utf-16-le')
+                        except UnicodeDecodeError:
+                            comment_str = data.decode('utf-16')
+                    else:
+                        # Fallback to ASCII/UTF-8
+                        comment_str = data.decode('ascii', errors='ignore')
+                    
+                    # Find first '{' to skip any stray chars
+                    start = comment_str.find('{')
                     if start != -1:
-                        comment_str = decoded[start:]
-                except:
-                    pass
-                
-                if comment_str:
-                    try:
-                        self.custom_tags = json.loads(comment_str)
-                    except json.JSONDecodeError:
-                        self.custom_tags = {}
+                        self.custom_tags = json.loads(comment_str[start:])
+                except Exception:
+                    self.custom_tags = {}
         except Exception:
             # If image has no EXIF or it's corrupted, start fresh
             self.exif_dict = {"0th": {}, "Exif": {}, "GPS": {}, "Interop": {}, "1st": {}, "thumbnail": None}
@@ -52,11 +69,8 @@ class TagManager:
 
     def add_tag(self, key, value, is_numeric=False):
         """Adds or updates a custom tag."""
-        if len(key) > 32:
-            raise ValueError("Tag name exceeds 32 characters")
-        
-        if not key.isalnum() and "_" not in key:
-            raise ValueError("Invalid tag name. Use alphanumeric and underscore only.")
+        if not validate_tag_name(key):
+            raise ValueError(f"Invalid tag name: {key}. Use alphanumeric/underscore and max 32 chars.")
 
         if is_numeric:
             try:
@@ -100,6 +114,7 @@ class TagManager:
         # Prepare UserComment with JSON
         json_data = json.dumps(self.custom_tags)
         # We'll use UNICODE prefix for safety
+        # Prefix must be exactly 8 bytes
         comment_bytes = b"UNICODE\x00" + json_data.encode('utf-16-le')
         
         if "Exif" not in self.exif_dict:
@@ -107,15 +122,16 @@ class TagManager:
         
         self.exif_dict["Exif"][self.USER_COMMENT_TAG] = comment_bytes
         
-        exif_bytes = piexif.dump(self.exif_dict)
-        
         try:
-            # We use PIL to save because piexif.insert only works for JPEG/TIFF
+            exif_bytes = piexif.dump(self.exif_dict)
             img = Image.open(self.image_path)
+            
+            # Modern Pillow handles 'exif' argument for JPEG and WebP
+            # For PNG, it's slightly different but Pillow 10+ supports it.
             img.save(output_path, exif=exif_bytes)
         except Exception as e:
             raise RuntimeError(f"Failed to save image with new EXIF: {str(e)}")
 
     @staticmethod
     def validate_tag_name(name):
-        return len(name) <= 32 and (name.isalnum() or "_" in name)
+        return validate_tag_name(name)
